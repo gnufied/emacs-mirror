@@ -623,6 +623,10 @@ Leaving \"Default\" unchecked is equivalent with specifying a default of
 						    "21.1")
              ;; term.c
              (visible-cursor cursor boolean "22.1")
+             (tty-use-osc-8-hyperlinks display boolean "31.2"
+              :set ,(lambda (symbol value)
+                      (set-default symbol value)
+                      (redraw-display)))
              ;; terminal.c
              (ring-bell-function display
               (choice

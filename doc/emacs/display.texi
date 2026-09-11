@@ -2054,6 +2054,20 @@ with the @code{homoglyph} face.  Curved quotes that are known not to
 be displayable are shown as their @acronym{ASCII} approximations
 @samp{`}, @samp{'}, and @samp{"} with the @code{homoglyph} face.
 
+@vindex tty-use-osc-8-hyperlinks
+  Terminals which support OSC 8 escape sequences can make displayed text
+clickable.  If you customize @code{tty-use-osc-8-hyperlinks} to a non-nil
+value, Emacs emits such hyperlinks for text whose @code{browse-url-data}
+text property is a nonempty string.  Its value is used as the link URL.
+This option is disabled by default since terminal support cannot be detected
+reliably.
+
+@lisp
+(setq tty-use-osc-8-hyperlinks t)
+(insert (propertize "GNU Emacs"
+                    'browse-url-data "https://www.gnu.org/software/emacs/"))
+@end lisp
+
 @node Cursor Display
 @section Displaying the Cursor
 @cindex text cursor

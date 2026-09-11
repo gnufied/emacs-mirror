@@ -1194,6 +1194,8 @@ line_hash_code (struct frame *f, struct glyph_row *row)
 	    c -= SPACEGLYPH;
 	  hash = (((hash << 4) + (hash >> 24)) & 0x0fffffff) + c;
 	  hash = (((hash << 4) + (hash >> 24)) & 0x0fffffff) + face_id;
+	  hash = (((hash << 4) + (hash >> 24)) & 0x0fffffff)
+	    + glyph->tty_url_hash;
 	  ++glyph;
 	}
 
@@ -3711,6 +3713,7 @@ produce_box_glyphs (enum box box, struct glyph_row *row, int x, int n,
       glyph->frame = child;
       glyph->padding_p = 0;
       glyph->object = Qnil;
+      glyph->tty_url_hash = 0;
       glyph->padding_p = 0;
     }
 }

@@ -755,6 +755,95 @@ encode_terminal_code (struct glyph *src, int src_len,
 
 /* An implementation of write_glyphs for termcap frames. */
 
+/* Return the URL associated with GLYPH, or nil if it has none.  Only
+   consult text properties: overlay properties can be window-specific, but
+   the low-level TTY glyph output interface doesn't identify the window.  */
+
+static Lisp_Object
+tty_glyph_url (struct glyph *glyph)
+{
+  Lisp_Object object = glyph->object;
+  ptrdiff_t pos = glyph->charpos;
+
+  if (!tty_use_osc_8_hyperlinks || pos < 0)
+    return Qnil;
+
+  if (STRINGP (object))
+    {
+      if (pos >= SCHARS (object))
+	return Qnil;
+    }
+  else if (BUFFERP (object))
+    {
+      struct buffer *buffer = XBUFFER (object);
+      if (!BUFFER_LIVE_P (buffer)
+	  || pos < BUF_BEG (buffer) || pos >= BUF_Z (buffer))
+	return Qnil;
+    }
+  else
+    return Qnil;
+
+  Lisp_Object url
+    = Fget_text_property (make_fixnum (pos), Qbrowse_url_data, object);
+  return STRINGP (url) && SBYTES (url) > 0 ? url : Qnil;
+}
+
+/* Return whether URL is safe to put inside an OSC string.  OSC strings are
+   terminated by BEL or ST, so reject all ASCII control characters to keep a
+   text property from injecting terminal commands.  */
+
+static bool
+tty_osc_8_url_safe_p (Lisp_Object url)
+{
+  for (ptrdiff_t i = 0; i < SBYTES (url); i++)
+    if (SREF (url, i) < 0x20 || SREF (url, i) == 0x7f)
+      return false;
+  return true;
+}
+
+/* Return a nonzero hash for GLYPH's OSC 8 URL, or zero if it has none.  */
+
+static unsigned
+tty_glyph_url_hash (struct glyph *glyph)
+{
+  Lisp_Object url = tty_glyph_url (glyph);
+  if (NILP (url))
+    return 0;
+
+  unsigned hash = XHASH (url) ^ XTYPE (url);
+  return hash ? hash : 1;
+}
+
+/* Write the OSC 8 introducer for the UTF-8 encoded URL, or the OSC 8
+   terminator if URL is nil.  A non-nil URL must have been checked by
+   tty_osc_8_url_safe_p.  */
+
+static void
+tty_write_osc_8 (struct tty_display_info *tty, Lisp_Object url)
+{
+  static char const open[] = "\033]8;;";
+  static char const close[] = "\033]8;;\033\\";
+
+  if (NILP (url))
+    {
+      fwrite (close, 1, sizeof close - 1, tty->output);
+      if (tty->termscript)
+	fwrite (close, 1, sizeof close - 1, tty->termscript);
+    }
+  else
+    {
+      fwrite (open, 1, sizeof open - 1, tty->output);
+      fwrite (SDATA (url), 1, SBYTES (url), tty->output);
+      fwrite ("\033\\", 1, 2, tty->output);
+      if (tty->termscript)
+	{
+	  fwrite (open, 1, sizeof open - 1, tty->termscript);
+	  fwrite (SDATA (url), 1, SBYTES (url), tty->termscript);
+	  fwrite ("\033\\", 1, 2, tty->termscript);
+	}
+    }
+}
+
 static void
 tty_write_glyphs_1 (struct frame *f, struct glyph *string, int len)
 {
@@ -783,9 +872,14 @@ tty_write_glyphs_1 (struct frame *f, struct glyph *string, int len)
       /* Identify a run of glyphs with the same face.  */
       int face_id = string->face_id;
       struct frame *face_id_frame = string->frame;
+      Lisp_Object url = tty_glyph_url (string);
+      Lisp_Object encoded_url
+	= NILP (url) || !tty_osc_8_url_safe_p (url)
+	  ? Qnil : ENCODE_UTF_8 (url);
 
       for (n = 1; n < stringlen; ++n)
-	if (string[n].face_id != face_id || string[n].frame != face_id_frame)
+	if (string[n].face_id != face_id || string[n].frame != face_id_frame
+	    || !EQ (tty_glyph_url (string + n), url))
 	  break;
 
       /* Turn appearance modes of the face of the run on.  */
@@ -801,10 +895,14 @@ tty_write_glyphs_1 (struct frame *f, struct glyph *string, int len)
       if (coding->produced > 0)
 	{
 	  block_input ();
+	  if (!NILP (encoded_url))
+	    tty_write_osc_8 (tty, encoded_url);
 	  fwrite (conversion_buffer, 1, coding->produced, tty->output);
-	  clearerr (tty->output);
 	  if (tty->termscript)
 	    fwrite (conversion_buffer, 1, coding->produced, tty->termscript);
+	  if (!NILP (encoded_url))
+	    tty_write_osc_8 (tty, Qnil);
+	  clearerr (tty->output);
 	  unblock_input ();
 	}
 
@@ -822,7 +920,6 @@ static void
 tty_write_glyphs_with_face (struct frame *f, struct glyph *string,
 			    int len, struct face *face)
 {
-  unsigned char *conversion_buffer;
   struct coding_system *coding;
 
   struct tty_display_info *tty = FRAME_TTY (f);
@@ -855,16 +952,33 @@ tty_write_glyphs_with_face (struct frame *f, struct glyph *string,
   tty_highlight_if_desired (tty);
   turn_on_face (f, face);
 
-  coding->mode |= CODING_MODE_LAST_BLOCK;
-  conversion_buffer = encode_terminal_code (string, len, coding);
-  if (coding->produced > 0)
+  for (int stringlen = len, n; stringlen; stringlen -= n, string += n)
     {
-      block_input ();
-      fwrite (conversion_buffer, 1, coding->produced, tty->output);
-      clearerr (tty->output);
-      if (tty->termscript)
-	fwrite (conversion_buffer, 1, coding->produced, tty->termscript);
-      unblock_input ();
+      Lisp_Object url = tty_glyph_url (string);
+      Lisp_Object encoded_url
+	= NILP (url) || !tty_osc_8_url_safe_p (url)
+	  ? Qnil : ENCODE_UTF_8 (url);
+      for (n = 1; n < stringlen; ++n)
+	if (!EQ (tty_glyph_url (string + n), url))
+	  break;
+
+      if (n == stringlen)
+	coding->mode |= CODING_MODE_LAST_BLOCK;
+      unsigned char *conversion_buffer
+	= encode_terminal_code (string, n, coding);
+      if (coding->produced > 0)
+	{
+	  block_input ();
+	  if (!NILP (encoded_url))
+	    tty_write_osc_8 (tty, encoded_url);
+	  fwrite (conversion_buffer, 1, coding->produced, tty->output);
+	  if (tty->termscript)
+	    fwrite (conversion_buffer, 1, coding->produced, tty->termscript);
+	  if (!NILP (encoded_url))
+	    tty_write_osc_8 (tty, Qnil);
+	  clearerr (tty->output);
+	  unblock_input ();
+	}
     }
 
   /* Turn appearance modes off.  */
@@ -949,11 +1063,19 @@ tty_insert_glyphs (struct frame *f, struct glyph *start, int len)
 
       if (coding->produced > 0)
 	{
+	  Lisp_Object url = glyph ? tty_glyph_url (glyph) : Qnil;
+	  Lisp_Object encoded_url
+	    = NILP (url) || !tty_osc_8_url_safe_p (url)
+	      ? Qnil : ENCODE_UTF_8 (url);
 	  block_input ();
+	  if (!NILP (encoded_url))
+	    tty_write_osc_8 (tty, encoded_url);
 	  fwrite (conversion_buffer, 1, coding->produced, tty->output);
-	  clearerr (tty->output);
 	  if (tty->termscript)
 	    fwrite (conversion_buffer, 1, coding->produced, tty->termscript);
+	  if (!NILP (encoded_url))
+	    tty_write_osc_8 (tty, Qnil);
+	  clearerr (tty->output);
 	  unblock_input ();
 	}
 
@@ -1592,6 +1714,7 @@ append_glyph (struct it *it)
       glyph->padding_p = i > 0;
       glyph->charpos = CHARPOS (it->position);
       glyph->object = it->object;
+      glyph->tty_url_hash = tty_glyph_url_hash (glyph);
       if (it->bidi_p)
 	{
 	  glyph->resolved_level = it->bidi_it.resolved_level;
@@ -1826,6 +1949,7 @@ append_composite_glyph (struct it *it)
       glyph->padding_p = false;
       glyph->charpos = CHARPOS (it->position);
       glyph->object = it->object;
+      glyph->tty_url_hash = tty_glyph_url_hash (glyph);
       if (it->bidi_p)
 	{
 	  glyph->resolved_level = it->bidi_it.resolved_level;
@@ -1921,6 +2045,7 @@ append_glyphless_glyph (struct it *it, int face_id, const char *str)
   glyph->padding_p = false;
   glyph->charpos = CHARPOS (it->position);
   glyph->object = it->object;
+  glyph->tty_url_hash = tty_glyph_url_hash (glyph);
   if (it->bidi_p)
     {
       glyph->resolved_level = it->bidi_it.resolved_level;
@@ -5221,6 +5346,8 @@ See also `display-pixel-height'.  */)
 void
 syms_of_term (void)
 {
+  DEFSYM (Qbrowse_url_data, "browse-url-data");
+
   DEFVAR_BOOL ("system-uses-terminfo", system_uses_terminfo,
     doc: /* Non-nil means the system uses terminfo rather than termcap.
 This variable can be used by terminal emulator packages.  */);
@@ -5265,6 +5392,15 @@ this is more efficient.  This combination can interfere with the
 functioning of some software, such as screen readers.  Set this to
 non-nil to enable this optimization.  */);
   tty_cursor_movement_use_TAB_BS = 0;
+
+  DEFVAR_BOOL ("tty-use-osc-8-hyperlinks", tty_use_osc_8_hyperlinks,
+    doc: /* Non-nil means emit OSC 8 hyperlinks on text terminals.
+When this is enabled, displayed text whose `browse-url-data' text property
+is a nonempty string is enclosed in OSC 8 escape sequences using that string
+as the URL.  URLs containing ASCII control characters are ignored.
+
+Enable this only if the terminal supports OSC 8 hyperlinks.  */);
+  tty_use_osc_8_hyperlinks = 0;
 
   defsubr (&Stty_display_color_p);
   defsubr (&Stty_display_color_cells);

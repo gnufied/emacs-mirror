@@ -24,6 +24,12 @@ with a prefix argument or by typing 'C-u C-h C-n'.
 
 * Changes in Emacs 31.2
 
+** New user option 'tty-use-osc-8-hyperlinks'.
+When non-nil, Emacs encloses text with a string-valued
+'browse-url-data' text property in OSC 8 hyperlink escape sequences
+when displaying it on a text terminal.  The option is nil by default;
+enable it only on terminals which support OSC 8 hyperlinks.
+
 
 * Editing Changes in Emacs 31.2
 

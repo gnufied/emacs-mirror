@@ -624,6 +624,10 @@ struct glyph
     /* Used to compare all bit-fields above in one step.  */
     unsigned val;
   } u;
+
+  /* Hash of the OSC 8 URL for this glyph on a text terminal, or zero if
+     the glyph isn't a hyperlink.  */
+  unsigned tty_url_hash;
 };
 
 
@@ -666,7 +670,8 @@ struct glyph
       && (X)->left_box_line_p == (Y)->left_box_line_p		\
       && (X)->right_box_line_p == (Y)->right_box_line_p		\
       && (X)->voffset == (Y)->voffset				\
-      && (X)->pixel_width == (Y)->pixel_width)
+      && (X)->pixel_width == (Y)->pixel_width			\
+      && (X)->tty_url_hash == (Y)->tty_url_hash)
 
 /* Are character codes, faces, padding_ps of glyphs *X and *Y equal?  */
 
@@ -674,7 +679,8 @@ struct glyph
   ((X)->u.ch == (Y)->u.ch			\
    && (X)->face_id == (Y)->face_id		\
    && (X)->frame == (Y)->frame			\
-   && (X)->padding_p == (Y)->padding_p)
+   && (X)->padding_p == (Y)->padding_p		\
+   && (X)->tty_url_hash == (Y)->tty_url_hash)
 
 /* Fill a character glyph GLYPH.  CODE, FACE_ID, PADDING_P correspond
    to the bits defined for the typedef `GLYPH' in lisp.h.  */
@@ -686,6 +692,7 @@ struct glyph
          (GLYPH).face_id = (FACE_ID);			\
          (GLYPH).frame = (FRAME);			\
          (GLYPH).padding_p = (PADDING_P);		\
+         (GLYPH).tty_url_hash = 0;			\
        }						\
      while (false)
 
